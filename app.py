@@ -14,7 +14,7 @@ def chat(message, history):
 
 gr.ChatInterface(
     fn=chat,
-    #type="messages",               # history arrives as {"role","content"} dicts
+    # type="messages",
     title="🔬 Research Sidekick — reads the web, keeps your notes",
     description=(
         "Share links and I'll read them, save the important bits, and recall "

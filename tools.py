@@ -22,7 +22,8 @@ HEADERS = {
 }
 
 MAX_CHARS = 6000               # keep scraped text inside free-tier limits
-NOTES_FILE = "notes.json"      # our tiny "database" — just a JSON file on disk
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+NOTES_FILE = os.path.join(BASE_DIR, "notes.json")      # our tiny "database" — just a JSON file on disk
 
 
 # ── Tool 1: read a web page (Class 1 scraper) ───────────────────────────────
@@ -40,7 +41,7 @@ def read_webpage(url):
         return f"Could not fetch the website. Error: {e}"
 
     soup = BeautifulSoup(response.text, "html.parser")
-    title = soup.title.string if soup.title else "No title found"
+    title = soup.title.string if soup.title and soup.title.string else "No title found"
 
     for tag in soup(["script", "style", "nav", "footer", "header", "img", "input"]):
         tag.decompose()

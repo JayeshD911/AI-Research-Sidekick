@@ -11,12 +11,35 @@ from tools import TOOLS_SCHEMA, TOOL_FUNCTIONS
 
 load_dotenv()
 
-# Same OpenAI client, different brain — pointed at Groq's free API (Class 1).
-client = OpenAI(
-    api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1",
-)
 MODEL = "llama-3.3-70b-versatile"   # free Groq model that supports tool calling
+
+
+def _get_client():
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Missing GROQ_API_KEY. Add it to your .env file before running the app."
+        )
+    return OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+
+
+def _normalize_history(history):
+    """Accept Gradio history in either tuple or message-dict form."""
+    if not history:
+        return []
+
+    normalized = []
+    for item in history:
+        if isinstance(item, dict):
+            role = item.get("role")
+            content = item.get("content")
+            if role and content is not None:
+                normalized.append({"role": role, "content": str(content)})
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            role, content = item[0], item[1]
+            if isinstance(role, str) and content is not None:
+                normalized.append({"role": role, "content": str(content)})
+    return normalized
 
 SYSTEM_PROMPT = (
     "You are Research Sidekick, a sharp, friendly research assistant.\n"
@@ -38,41 +61,65 @@ def run_agent(user_message, history=None):
     """One chat turn: think -> (use any tools it needs) -> answer.
     `history` = in-chat memory; the notes file = across-session memory."""
 
-    # system prompt + past turns + the new message.
-    # Gradio (type="messages") gives history as [{"role","content"}, ...] —
-    # exactly the format the API wants, so we drop it straight in.
+    try:
+        client = _get_client()
+    except RuntimeError as exc:
+        return str(exc)
+
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if history:
-        messages.extend(history)
+    messages.extend(_normalize_history(history))
     messages.append({"role": "user", "content": user_message})
 
-    # The loop: keep going while the model wants to use tools. This is what lets
-    # it do MULTI-STEP jobs (read page A, read page B, save the difference...).
     for _ in range(MAX_TOOL_HOPS):
-        response = client.chat.completions.create(
-            model=MODEL, messages=messages, tools=TOOLS_SCHEMA)
-        msg = response.choices[0].message
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=TOOLS_SCHEMA,
+            )
+            msg = response.choices[0].message
+        except Exception as exc:
+            return f"I could not reach the model. Check your API key or network connection. Error: {exc}"
 
-        # No tool requested → this is the final answer.
         if not msg.tool_calls:
-            return msg.content
+            return msg.content or "I don't have a reply right now."
 
-        # Otherwise: record the request, run each tool, feed results back.
-        messages.append(msg)
+        assistant_message = {
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "type": call.type,
+                    "function": {
+                        "name": call.function.name,
+                        "arguments": call.function.arguments,
+                    },
+                }
+                for call in msg.tool_calls
+            ],
+        }
+        messages.append(assistant_message)
+
         for call in msg.tool_calls:
             fn = TOOL_FUNCTIONS.get(call.function.name)
-            args = json.loads(call.function.arguments)
-            result = fn(**args) if fn else f"Unknown tool: {call.function.name}"
-            messages.append({
-                "role": "tool",                 # the third role, from Class 2
-                "tool_call_id": call.id,
-                "content": result,
-            })
-        # loop again so the model can use the results (and maybe call more tools)
+            try:
+                args = json.loads(call.function.arguments)
+                result = fn(**args) if fn else f"Unknown tool: {call.function.name}"
+            except Exception as exc:
+                result = f"Tool '{call.function.name}' failed: {exc}"
 
-    # Ran out of hops — force a final answer with no more tools.
-    final = client.chat.completions.create(model=MODEL, messages=messages)
-    return final.choices[0].message.content
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": str(result),
+            })
+
+    try:
+        final = client.chat.completions.create(model=MODEL, messages=messages)
+        return final.choices[0].message.content or "I reached the tool limit without a final answer."
+    except Exception as exc:
+        return f"The conversation reached the tool limit, and the final reply could not be generated. Error: {exc}"
 
 
 if __name__ == "__main__":
